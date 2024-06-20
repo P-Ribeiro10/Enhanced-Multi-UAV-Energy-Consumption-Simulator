@@ -1,0 +1,17 @@
+Number of Groups:
+1
+Number of GUs:
+2
+Number of GUs in each Group:
+2,
+Positions(x,y,z), Traffic(Mbit/s):
+47,32,0,200.0
+52,71,0,117.0
+
+Ideal Position= [47.675738274464386, 37.22987840185292, 6.0]
+
+Best: Circular
+Best: Circular
+SUPPLY Rotary:  483.45
+SUPPLY Fixed:  1066.8
+Energy consumption increase (%): 121.0
