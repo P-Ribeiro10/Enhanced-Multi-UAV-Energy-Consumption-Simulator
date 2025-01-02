@@ -1,11 +1,8 @@
 from mpl_toolkits import mplot3d
 from mpl_toolkits.mplot3d import Axes3D
-import sys
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib import pyplot as plt, patches
-import collections
 from collections import Counter
 from scipy import optimize
 
@@ -37,6 +34,7 @@ P0=(delta/8)*rho*s*A*math.pow(omega,3)*math.pow(R,3)
 Pi=(1+k)*(math.pow(W,3/2)/math.sqrt(2*rho*A))
 
 alt_min=6
+alt_max=6
 flag=0
 
 colors = ['b','r','g','m','y','c','k','b','r']
@@ -52,7 +50,13 @@ TEH_Oval_Area = 0
 TEH_SUPPLY_ROTARY = 0
 TEH_SUPPLY_FIXED = 0
 TEH_SUPPLY_Aux = 0
-Best_flag=0
+
+best_flag = {
+    0: "Best: None",
+    1: "Best: Circular",
+    2: "Best: Inner Elliptic",
+    3: "Best: Elliptic"
+}
 
 # Rotary-Wing Energy Consumption Model-----------------------------------
 def P_rotary(V,r):
@@ -155,7 +159,7 @@ n_points=[]
 nGUs_group=[]   #Stores number of GUs per group
 TotalPoints=[]  #Stores the points of all intersetion areas
 
-#Dictionary for SNR and Data rate relation
+#Dictionary for SNR and Data Rate relation for WiFi 802.11ac
 dicMCS=[
     {"SNR":13.1,"data_rate":53/nGUs},
     {"SNR":13.6,"data_rate":103/nGUs},
@@ -169,79 +173,150 @@ dicMCS=[
     {"SNR":35.3,"data_rate":553/nGUs}
 ]
 
-
 for i in range(int(nGroups)):
     nGUs_group.append(int(line[i]))
 
 print("nGUs_group: " + str(nGUs_group) + "\n")
 
-for n in range(int(nGroups)):
-    GUs=[]
-    x=[]
-    y=[]
-    z=[]
-    traffic=[]
-    f.readline()
-    for j in range (nGUs_group[n]):
-        GUs.append((f.readline().split(",")))
+def processGUData(f, nGUs_group, n, nGUs):
+    GUs = []
+    x = []
+    y = []
+    z = []
+    traffic = []
+
+    f.readline()  # Skip the header line
+    for j in range(nGUs_group[n]):
+        GUs.append(f.readline().split(","))
         x.append(float(GUs[j][0]))
         y.append(float(GUs[j][1]))
         z.append(float(GUs[j][2]))
         traffic.append(float(GUs[j][3]))
-        if(traffic[j]>(maxMCS/nGUs)):
-            traffic[j]=maxMCS/nGUs
-        j+=1
-        
 
+        if traffic[j] > (maxMCS / nGUs):
+            traffic[j] = maxMCS / nGUs
+
+    return GUs, x, y, z, traffic
+
+def map_traffic_to_snr(traffic, dicMCS, SNR_MARGIN):
+    data_rate_val = []
+
+    for t in traffic:
+        # Find the minimum valid data rate that satisfies the condition
+        valid_data_rates = [dicMCS[i].get("data_rate") for i in range(10) if dicMCS[i].get("data_rate") >= t]
+        data_rate_val.append(min(valid_data_rates) if valid_data_rates else None)
+
+    SNR_values = []
+
+    for rate in data_rate_val:
+        # Find the SNR value corresponding to the data rate
+        if rate is not None:
+            for entry in dicMCS:
+                if entry.get("data_rate") == rate:
+                    SNR_values.append(entry.get("SNR") + SNR_MARGIN)
+                    break
+
+    return SNR_values
+
+def calculate_valid_points(x, y, z, xToCalcPos, yToCalcPos, xToCalcNeg, yToCalcNeg, alt_max, alt_min, step, Pt, noise, SNR_values, c, freq):
+    """
+    Calculate valid points where all SNR values are greater than or equal to the threshold.
+
+    Parameters:
+    x, y, z : list
+        Coordinates of points.
+    xToCalcPos, yToCalcPos : list
+        Positive range for x and y.
+    xToCalcNeg, yToCalcNeg : list
+        Negative range for x and y.
+    alt_max : float
+        Maximum altitude.
+    alt_min : float
+        Minimum altitude.
+    step : float
+        Increment step for grid calculation.
+    Pt : float
+        Transmitted power.
+    noise : float
+        Noise.
+    SNR_values : list
+        Threshold SNR values for each point.
+    c : float
+        Speed of light.
+    freq : float
+        Frequency of the signal.
+
+    Returns:
+    valid_points : list
+        List of valid points meeting the SNR conditions.
+    """
+    # Precompute coordinates of known points
+    pd = [np.array((x[i], y[i], z[i])) for i in range(len(x))]
+
+    # Define bounds for the grid
+    xmax, ymax, zmax = max(xToCalcPos), math.floor(max(yToCalcPos)), alt_max
+    xmin, ymin, zmin = min(xToCalcNeg), min(yToCalcNeg), alt_min
+
+    valid_points = []
+
+    # Iterate through the grid
+    xd = xmin
+    while xd <= xmax:
+        yd = ymin
+        while yd <= ymax:
+            zd = zmin
+            while zd <= zmax:
+                current_point = np.array((xd, yd, zd))
+                
+                # Calculate SNR for all points
+                count = 0
+                for i in range(len(pd)):
+                    dist = np.linalg.norm(pd[i] - current_point)
+                    
+                    if dist == 0:
+                        Pr = Pt
+                    else:
+                        Pr = Pt + 20 * math.log10(c / (4 * freq * dist * math.pi))
+
+                    if (Pr - noise) >= SNR_values[i]:
+                        count += 1
+
+                # If all points meet the condition, add the current point
+                if count == len(pd):
+                    valid_points.append(current_point)
+
+                zd += step
+            yd += step
+        xd += step
+
+    return valid_points
+
+for n in range(int(nGroups)):
+    GUs, x, y, z, traffic = processGUData(f, nGUs_group, n, nGUs)
+    
     print(x)
     print(y)
     print(z)
     print(traffic)
     
-    #Map traffic to SNR
-    data_rate_val=[None]*len(traffic)
+    SNR_values = map_traffic_to_snr(traffic, dicMCS, SNR_MARGIN)
+    
+    xToCalcPos, xToCalcNeg = [], []
+    yToCalcPos, yToCalcNeg = [], []
+    zToCalcPos, zToCalcNeg = [], []
 
-    j=0
-    while j < len(traffic):
-        i=0
-        sums=[]
-        while i<10:
-            current=dicMCS[i].get("data_rate")-traffic[j]
-            if(current>=0):
-                sums.append(current)
-                if(min(sums)==current):
-                    data_rate_val[j]=dicMCS[i].get("data_rate")
-            i+=1  
-        j+=1
+    # Iterate through SNR values and calculate positions
+    for j, snr in enumerate(SNR_values):
+        dist = math.floor(distanceForSNR(snr))
 
-    SNR_values=[]
-    for j in data_rate_val:
-        i=0
-        while i<10:
-            data_rate=dicMCS[i].get("data_rate")
-            if(j==data_rate):
-                SNR_values.append(dicMCS[i].get("SNR") + SNR_MARGIN)
-            i+=1
+        xToCalcPos.append(x[j] + dist)
+        xToCalcNeg.append(x[j] - dist)
+        yToCalcPos.append(y[j] + dist)
+        yToCalcNeg.append(y[j] - dist)
+        zToCalcPos.append(z[j] + dist)
+        zToCalcNeg.append(z[j] - dist)
 
-    xToCalcPos=[]*len(SNR_values)
-    xToCalcNeg=[]*len(SNR_values)
-    yToCalcPos=[]*len(SNR_values)
-    yToCalcNeg=[]*len(SNR_values)
-    zToCalcPos=[]*len(SNR_values)
-    zToCalcNeg=[]*len(SNR_values)
-
-    j=0
-    for i in SNR_values:
-        dist=distanceForSNR(i)
-        xToCalcPos.append(x[j]+math.floor(dist))
-        xToCalcNeg.append(x[j]-math.floor(dist))
-        yToCalcPos.append(y[j]+math.floor(dist))
-        yToCalcNeg.append(y[j]-math.floor(dist))
-        zToCalcPos.append(z[j]+math.floor(dist))
-        zToCalcNeg.append(z[j]-math.floor(dist))
-        j+=1
-
-    #min/max positions
+    # Print minimum and maximum positions
     print("\nMin/Max Pos:")
     print(xToCalcPos)
     print(xToCalcNeg)
@@ -250,8 +325,8 @@ for n in range(int(nGroups)):
     print(zToCalcPos)
     print(zToCalcNeg)
     print("\n")
- 
-    '''#figure for positions
+
+    '''#Figure for positions
 
     fig= plt.figure()
     ax = plt.axes(projection='3d')
@@ -288,101 +363,24 @@ for n in range(int(nGroups)):
         ax.set_aspect('equal', adjustable='box')
 
         i+=1 '''
-
+    
     # Calculate points where all of the SNR is >= threshold
-    i=0
-
-    pd= [[]]*len(x)
-
-    while i<len(x):
-        pd[i]= np.array((x[i],y[i],z[i]))
-        i+=1
-
-    # Beginning of PREP
-    xmax , ymax, zmax = max(xToCalcPos), math.floor(max(yToCalcPos)), alt_min   #max(zToCalcPos) assim só tem de verificar uma altura
-    xd, yd, zd = min(xToCalcNeg), min(yToCalcNeg), alt_min                      #zd=altura minima se zd=min(zToCalcNeg) fica definida pelas esferas
-
-    def calculateValidPoints(pd,xmax,ymax,zmax,xd,yd,zd,SNR_values):
-        validPoints = []
-        dist = [None]*len(x)
-        while xd <= xmax:
-            yd=min(yToCalcNeg)
-            count=0
-            while yd <= ymax:
-                zd=alt_min #zd=altura minima se zd=min(zToCalcNeg) fica definida pelas esferas
-                count=0
-                while zd <= zmax:
-                    currentPoint=np.array((xd,yd,zd))
-                    #print('Current Point ='+str(currentPoint))
-                    i=0
-                    count=0
-                    while i<len(x):
-                        dist[i] = np.linalg.norm(pd[i]-currentPoint)
-                        if(dist[i]==0):
-                            Pr=Pt
-                            if((Pr-noise)>=SNR_values[i]):
-                                count+=1
-                        elif(dist[i]>0.0):
-                            Pr=Pt+20*math.log10(c/(4*freq*dist[i]*math.pi))
-                            if((Pr-noise)>=SNR_values[i]):
-                                count+=1
-                        #print("FMAP"+str(i)+" with SNR: "+str(SNR_values[i]))        
-                        dist[i]=None
-                        i+=1    
-                    if(count==len(x)):
-                        validPoints.append(currentPoint)
-                    zd+=step
-                yd+=step
-            xd+=step
-
-        return validPoints
-
-    happened=0
-
-    validPoints=calculateValidPoints(pd,xmax,ymax,zmax,xd,yd,zd,SNR_values)
+    validPoints = calculate_valid_points(x, y, z, xToCalcPos, yToCalcPos, xToCalcNeg, yToCalcNeg, alt_max, alt_min, step, Pt, noise, SNR_values, c, freq)
     
     if(len(validPoints)==0):
         print("No intersection was found")
-        exit()
 
-    print("Length: ",len(validPoints))
-    print("SNR values = ",SNR_values)
-    print("Transmit Power: ",Pt)
+    print("Number of points: ", len(validPoints))
+    print("SNR values = ", SNR_values)
 
-    #Plot for the points for the volume admissible
-    validAltitudes=[]
+    validAltitudes = [j[2] for j in validPoints]
 
-    for j in validPoints:
-        #ax.scatter(j[0],j[1],j[2],marker='o')
-        validAltitudes.append(j[2])
+    # Find the most common altitude
+    desiredAltitude = Counter(validAltitudes).most_common(1)[0][0]
 
-    occurences= Counter(validAltitudes) # Find the altitude with the biggest area
-    #print(occurences)
-    desiredAltitude= occurences.most_common(1)[0][0] 
+    print("Desired Altitude= " + str(desiredAltitude))
 
-    print("Desired Altitude= "+str(desiredAltitude))
-
-    if(happened!=0):
-        fig = plt.figure()
-
-        ax = plt.axes(projection='3d')
-        ax.set_title('SNR for FMAPs')
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        i=0
-        while i<len(x):
-            u = np.linspace(0, 2 * np.pi, 100)
-            v = np.linspace(0, np.pi, 100)
-
-            distance=distanceForSNR(SNR_values[i])
-            xs = x[i] + distance * np.outer(np.cos(u), np.sin(v))
-            ys = y[i] + distance* np.outer(np.sin(u), np.sin(v))
-            zs = z[i] + distance * np.outer(np.ones(np.size(u)), np.cos(v))
-            ax.plot_surface(xs, ys, zs,  rstride=4, cstride=4, alpha=0.5)
-            i+=1
-
-    #plot area for desired altitude
+    #Plot area for desired altitude (intersection area)
     '''fig = plt.figure()
 
     ax = plt.axes(projection='3d')
@@ -393,12 +391,14 @@ for n in range(int(nGroups)):
     ax.set_zlabel('Z')
     '''
     
-    pointsArea=[] #Points in the desired altitude
+    #Points in the desired altitude
+      
+    pointsArea = [point for point in validPoints if point[2] == desiredAltitude]
 
-    for j in validPoints:
-        if(j[2]==desiredAltitude):
-            #ax.scatter(j[0],j[1],j[2], marker='o', color=colors[n]) 
-            pointsArea.append(j)
+    # Uncomment the following line to visualize points if needed
+    #for point in pointsArea:
+        #ax.scatter(point[0], point[1], point[2], marker='o', color=colors[n])
+
     #ax.set_xlim(0,100)
     #ax.set_ylim(0,100)
     
@@ -408,14 +408,13 @@ for n in range(int(nGroups)):
     ax.set_aspect('equal', adjustable='box')'''
 
     j=0
-    if TotalPoints!=[]: 
+    if TotalPoints: 
         for ind, j in enumerate(pointsArea):
             for l in TotalPoints:
                 if (np.array_equal(j, l)):
                     flag=1
                     print(j,l)
                     pointsArea.pop(ind)
-
 
     TotalPoints.extend(pointsArea)
     print("Points in area: ", len(pointsArea))
@@ -428,15 +427,13 @@ for n in range(int(nGroups)):
     idealPos=[sum(xarray)/len(pointsArea),sum(yarray)/len(pointsArea),desiredAltitude]
     idealPosnoZ=[sum(xarray)/len(pointsArea),sum(yarray)/len(pointsArea)]
 
-    print("Ideal Position= "+str(idealPos))
+    print("Ideal Position= " + str(idealPos))
 
-    
     '''fig = plt.figure()
 
     ax = plt.axes(projection='3d')
     #ax.set_title('Perimeter and Circular Trajectory Group %d' %(n+1))
     ax.set_title('Circular', fontsize = 22)
-    #ax.set_title('EREP')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')'''
@@ -478,301 +475,10 @@ for n in range(int(nGroups)):
     if len(perimeter) <= 2:
         r=0
     #-----------------------------------------------------------
-
-    #define points
-    ymin=min(yarray)
-    ymax=max(yarray)
-    xmax=max(xarray)
-    xmin=min(xarray)
-
-    xymin=[] 
-    xymax=[] 
-    yxmin=[] 
-    yxmax=[] 
-
-    for j in pointsArea:
-        if(j[0]==xmin):
-            yxmin.append(j[1])
-        if(j[0]==xmax):
-            yxmax.append(j[1])
-        if(j[1]==ymin):
-            xymin.append(j[0])
-        if(j[1]==ymax):
-            xymax.append(j[0])
-
-    def calculateDistanceT(point1,point2,point3,point4,pointI):
-        pn1=np.array(point1)
-        pn2=np.array(point2)
-        pn3=np.array(point3)
-        pn4=np.array(point4)
-        pnI=np.array(pointI)
-
-        d1=np.linalg.norm(pnI-pn1)
-        d2=np.linalg.norm(pnI-pn2)
-        d3=np.linalg.norm(pnI-pn3)
-        d4=np.linalg.norm(pnI-pn4)
-        d12=np.linalg.norm(pn2-pn1)
-        d34=np.linalg.norm(pn4-pn3)
-
-        dTotal=d1+d2+d3+d4+d12+d34
-
-        return dTotal
-
-    l1x=[0]*3
-    l1y=[0]*3
-    l2x=[0]*3
-    l2y=[0]*3
-    l3x=[0]*3
-    l3y=[0]*3
-    l4x=[0]*3
-    l4y=[0]*3
-    l5x=[0]*3
-    l5y=[0]*3
-    l6x=[0]*3
-    l6y=[0]*3
-
-    #trajectory 1 points
-
-    point1T1=[min(xymin),ymin,desiredAltitude]
-    point2T1=[max(xymin),ymin,desiredAltitude]
-    point3T1=[min(xymax),ymax,desiredAltitude]
-    point4T1=[max(xymax),ymax,desiredAltitude]
-
-    """PLOT!!! 
-    fig = plt.figure()
-
-    ax = plt.axes(projection='3d')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z') """
-
-    #define lines 
-    lz=[desiredAltitude,desiredAltitude]
-    #between p1 and p2
-    l1x[0]=[point1T1[0],point2T1[0]]
-    l1y[0]=[point1T1[1],point2T1[1]]
-    #between p3 and p4
-    l2x[0]=[point3T1[0],point4T1[0]]
-    l2y[0]=[point3T1[1],point4T1[1]]
-    #between p1 and ideal
-    l3x[0]=[point1T1[0],idealPos[0]]
-    l3y[0]=[point1T1[1],idealPos[1]]
-    #between p2 and ideal
-    l4x[0]=[point2T1[0],idealPos[0]]
-    l4y[0]=[point2T1[1],idealPos[1]]
-    #between p3 and ideal
-    l5x[0]=[point3T1[0],idealPos[0]]
-    l5y[0]=[point3T1[1],idealPos[1]]
-    #between p4 and ideal
-    l6x[0]=[point4T1[0],idealPos[0]]
-    l6y[0]=[point4T1[1],idealPos[1]]
-    #plot all of them
-    """ ax.plot(l1x[0],l1y[0],lz)
-    ax.plot(l2x[0],l2y[0],lz)
-    ax.plot(l3x[0],l3y[0],lz)
-    ax.plot(l4x[0],l4y[0],lz)
-    ax.plot(l5x[0],l5y[0],lz)
-    ax.plot(l6x[0],l6y[0],lz)
-    ax.legend() """
-    distanceT1=calculateDistanceT(point1T1,point2T1,point3T1,point4T1,idealPos)
-
-    #trajectory 2
-
-    """PLOT!!!
-    fig = plt.figure()
-
-    ax = plt.axes(projection='3d')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z') """
-
-
-    point1T2=[xmin,min(yxmin),desiredAltitude]
-    point2T2=[xmin,max(yxmin),desiredAltitude]
-    point3T2=[xmax,min(yxmax),desiredAltitude]
-    point4T2=[xmax,max(yxmax),desiredAltitude]
-
-    distanceT2=calculateDistanceT(point1T2,point2T2,point3T2,point4T2,idealPos)
-
-    #define lines 
-    lz=[desiredAltitude,desiredAltitude]
-    #between p1 and p2
-    l1x[1]=[point1T2[0],point2T2[0]]
-    l1y[1]=[point1T2[1],point2T2[1]]
-    #between p3 and p4
-    l2x[1]=[point3T2[0],point4T2[0]]
-    l2y[1]=[point3T2[1],point4T2[1]]
-    #between p1 and ideal
-    l3x[1]=[point1T2[0],idealPos[0]]
-    l3y[1]=[point1T2[1],idealPos[1]]
-    #between p2 and ideal
-    l4x[1]=[point2T2[0],idealPos[0]]
-    l4y[1]=[point2T2[1],idealPos[1]]
-    #between p3 and ideal
-    l5x[1]=[point3T2[0],idealPos[0]]
-    l5y[1]=[point3T2[1],idealPos[1]]
-    #between p4 and ideal
-    l6x[1]=[point4T2[0],idealPos[0]]
-    l6y[1]=[point4T2[1],idealPos[1]]
-    #plot all of them
-    """ ax.plot(l1x[1],l1y[1],lz)
-    ax.plot(l2x[1],l2y[1],lz)
-    ax.plot(l3x[1],l3y[1],lz)
-    ax.plot(l4x[1],l4y[1],lz)
-    ax.plot(l5x[1],l5y[1],lz)
-    ax.plot(l6x[1],l6y[1],lz) """
-
-    #trajectory 3
-
-    """ PLOT!!!
-    fig = plt.figure()
-
-    ax = plt.axes(projection='3d')
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z') """
-
-    idealPosXfloor=math.floor(idealPos[0])
-    idealPosXceil=math.ceil(idealPos[0])
-    idealPosYfloor=math.floor(idealPos[1])
-    idealPosYceil=math.ceil(idealPos[1])
-
-    yinIdealXfloor=[]
-    yinIdealXceil=[]
-    xinIdealYfloor=[]
-    xinIdealYceil=[]
-    for j in pointsArea:
-        if(j[0]==idealPosXfloor):
-            yinIdealXfloor.append(j[1])
-        if(j[0]==idealPosXceil):
-            yinIdealXceil.append(j[1])
-
-    if(len(yinIdealXfloor)>len(yinIdealXceil)):
-        xidealPosR=idealPosXfloor
-    if(len(yinIdealXfloor)<len(yinIdealXceil)):
-        xidealPosR=idealPosXceil
-    if(len(yinIdealXceil)==len(yinIdealXfloor)):
-        xidealPosR=round(idealPos[0])
-
-    for j in pointsArea:
-        if(j[1]==idealPosYfloor):
-            xinIdealYfloor.append(j[0])
-        if(j[1]==idealPosYceil):
-            xinIdealYceil.append(j[0])
-
-    if(len(xinIdealYfloor)>len(xinIdealYceil)):
-        yidealPosR=idealPosYfloor
-    if(len(xinIdealYfloor)<len(xinIdealYceil)):
-        yidealPosR=idealPosYceil
-    if(len(xinIdealYceil)==len(xinIdealYfloor)):
-        yidealPosR=round(idealPos[1])
-
-    yinXideal=[]
-    xinYideal=[]
-
-    for j in pointsArea:
-        if(j[0]==xidealPosR):
-            yinXideal.append(j[1])
-        if(j[1]==yidealPosR):
-            xinYideal.append(j[0])
-
-    point1T3=[xidealPosR,max(yinXideal)]
-    point2T3=[min(xinYideal),yidealPosR]
-    point3T3=[max(xinYideal),yidealPosR]
-    point4T3=[xidealPosR,min(yinXideal)]
-
-    idealPosR=[xidealPosR,yidealPosR]
-
-    distanceT3=calculateDistanceT(point1T3,point2T3,point3T3,point4T3,idealPosR)
-
-    #define lines 
-    lz=[desiredAltitude,desiredAltitude]
-    #between p1 and p2
-    l1x[2]=[point1T3[0],point2T3[0]]
-    l1y[2]=[point1T3[1],point2T3[1]]
-    #between p3 and p4
-    l2x[2]=[point3T3[0],point4T3[0]]
-    l2y[2]=[point3T3[1],point4T3[1]]
-    #between p1 and ideal
-    l3x[2]=[point1T3[0],idealPos[0]]
-    l3y[2]=[point1T3[1],idealPos[1]]
-    #between p2 and ideal
-    l4x[2]=[point2T3[0],idealPos[0]]
-    l4y[2]=[point2T3[1],idealPos[1]]
-    #between p3 and ideal
-    l5x[2]=[point3T3[0],idealPos[0]]
-    l5y[2]=[point3T3[1],idealPos[1]]
-    #between p4 and ideal
-    l6x[2]=[point4T3[0],idealPos[0]]
-    l6y[2]=[point4T3[1],idealPos[1]]
-    #plot all of them
-    """ PLOT!!!
-    ax.plot(l1x[2],l1y[2],lz)
-    ax.plot(l2x[2],l2y[2],lz)
-    ax.plot(l3x[2],l3y[2],lz)
-    ax.plot(l4x[2],l4y[2],lz)
-    ax.plot(l5x[2],l5y[2],lz)
-    ax.plot(l6x[2],l6y[2],lz)
-    ax.legend() """
-
-    print("Distance T1: ",distanceT1)
-    print("Distance T2: ",distanceT2)
-    print("Distance T3: ",distanceT3)
-
-    #trajectory plot for the chosen path
-    chosen=0
-    maxDistance=max(distanceT1,distanceT2,distanceT3)
-
-    if(maxDistance==distanceT1):
-        chosen=0
-        point1F=point1T1[0:2]
-        point2F=point2T1[0:2]
-        point3F=point3T1[0:2]
-        point4F=point4T1[0:2]
-    if(maxDistance==distanceT2):
-        chosen=1
-        point1F=point1T2[0:2]
-        point2F=point2T2[0:2]
-        point3F=point3T2[0:2]
-        point4F=point4T2[0:2]
-        
-    if(maxDistance==distanceT3):
-        chosen=2
-        point1F=point1T3[0:2]
-        point2F=point2T3[0:2]
-        point3F=point3T3[0:2]
-        point4F=point4T3[0:2]
-
-    print("Central Point : ", idealPos)
-    print("Point 1 : ", point1F)
-    print("Point 2 : ", point2F)
-    print("Point 3 : ", point3F)
-    print("Point 4 : ", point4F)
-
-    '''fig = plt.figure()
-
-    ax = plt.axes(projection='3d')
-    ax.set_title('Trajectory Line Area %d' %(n+1))
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')'''
-
-    '''ax.plot(l3x[chosen],l3y[chosen],lz,label="Pc->P1")
-    ax.plot(l1x[chosen],l1y[chosen],lz,label="P1->P2")
-    ax.plot(l4x[chosen],l4y[chosen],lz,label="P2->Pc")
-    ax.plot(l5x[chosen],l5y[chosen],lz,label="Pc->P3")
-    ax.plot(l2x[chosen],l2y[chosen],lz,label="P3->P4")
-    ax.plot(l6x[chosen],l6y[chosen],lz,label="P4->Pc")
-    ax.legend()'''
-
-    print("Trajectory ",chosen+1, "was selected")
-    #end of PREP
-  
-    print("Total Distance: ", maxDistance)
     
     print("\n---------------------------- ROTARY-WING ------------------------")
     r_inf=float('inf')
-    velocityStraight=optimize.fmin(P_rotary,0,args=(r_inf,))
+    velocityStraight=optimize.fmin(P_rotary, 0, args=(r_inf,))
     powerStraight=P_rotary(velocityStraight[0],r_inf)
     powerHover=P_rotary(0,r_inf)
 
@@ -780,13 +486,6 @@ for n in range(int(nGroups)):
     print("Minimum Power=" + str(powerStraight))
     print("Hover Power=" + str(powerHover))
 
-    timeTrajectory=maxDistance/velocityStraight[0]
-    powerConsumed=timeTrajectory*powerStraight+4*powerHover
-    ifHovering=(timeTrajectory+4)*powerHover
-    
-    # Energy consumed per Hour Trajectories
-    TEH_Trajectory=TEH_Trajectory+3600*powerConsumed/(timeTrajectory+4)
-    
     # Energy consumed per Hour Hovering
     TEH_Hovering=TEH_Hovering+3600*powerHover
 
@@ -798,7 +497,7 @@ for n in range(int(nGroups)):
     print("Radius: ", r)
     if r > 0:
         print("\n------ CIRCULAR ------")
-        minVelocity=optimize.fmin(P_rotary,0,args=(r,))
+        minVelocity=optimize.fmin(P_rotary, 0, args=(r,))
         minPower=P_rotary(minVelocity[0],r)
 
         circularPower=P_rotary(minVelocity, r)
@@ -834,7 +533,7 @@ for n in range(int(nGroups)):
             circular.write(str(t) +","+ str(round(x[t-30],2)) +","+ str(round(y[t-30],2)) +"\n")        
 
 
-        print("\n-------- OVAL (CIRCULAR) --------")
+        print("\n-------- INNER-ELLIPTIC --------")
         ratio=3/10
         r2=r*ratio
         
@@ -895,7 +594,7 @@ for n in range(int(nGroups)):
             #ax.plot(xx, yy, desiredAltitude, color='orange')
             #ax.set_aspect('equal', adjustable='box')
         
-            minVelocity=optimize.fmin(P_rotary,0,args=(r2,))
+            minVelocity=optimize.fmin(P_rotary, 0, args=(r2,))
             power=P_rotary(minVelocity, r2)
 
             print("Curve Min Power Velocity: ", minVelocity[0])
@@ -955,7 +654,7 @@ for n in range(int(nGroups)):
             TEH_Oval_Circular=TEH_Oval_Circular+energy
 
 
-        print("\n-------- OVAL (AREA) --------")
+        print("\n-------- ELLIPTIC --------")
         idealPos[0]=(coords[index][2]+coords[index][0])/2
         idealPos[1]=(coords[index][3]+coords[index][1])/2
 
@@ -1075,10 +774,10 @@ for n in range(int(nGroups)):
         print("\n------ CIRCULAR ------")
         print("Hovering!!")
         TEH_Circular=TEH_Circular+3600*powerHover
-        print("\n-------- OVAL (CIRCULAR) --------")
+        print("\n-------- INNER-ELLIPTIC --------")
         print("Hovering!!")
         TEH_Oval_Circular=TEH_Oval_Circular+3600*powerHover
-        print("\n-------- OVAL (AREA) -----")
+        print("\n-------- ELLIPTIC -----")
         print("Hovering!!")
         TEH_Oval_Area=TEH_Oval_Area+3600*powerHover
 
@@ -1086,21 +785,14 @@ for n in range(int(nGroups)):
     
     TEH_SUPPLY_ROTARY+=TEH_SUPPLY_Aux
 
-    if Best_flag==0:
-        print("Best: None")
-    elif Best_flag==1:
-        print("Best: Circular")
-    elif Best_flag==2:
-        print("Best: Oval(circular)")
-    elif Best_flag==3:
-        print("Best: Oval(area)")
+    print(best_flag.get(Best_flag))
 
     # -------------------------------------------------------------
         
     print("\n--------------------------- FIXED-WING ------------------------")
     
     r_inf=float('inf')
-    velocityStraight=optimize.fmin(P_fixed,0,args=(r_inf,))
+    velocityStraight=optimize.fmin(P_fixed, 0, args=(r_inf,))
     powerStraight=P_fixed(velocityStraight[0],r_inf)
     
     print("Minimum Power Velocity = " + str(velocityStraight[0]))
@@ -1116,7 +808,7 @@ for n in range(int(nGroups)):
         print("\n------ CIRCULAR ------")
         print("Radius: ", r)
 
-        minVelocity=optimize.fmin(P_fixed,0,args=(r,))
+        minVelocity=optimize.fmin(P_fixed, 0, args=(r,))
         minPower=P_fixed(minVelocity[0],r)
 
         circularPower=P_fixed(minVelocity, r)[0]
@@ -1151,7 +843,7 @@ for n in range(int(nGroups)):
             circular_fixed.write(str(t) +","+ str(round(x[t-30],2)) +","+ str(round(y[t-30],2)) +"\n")        
 
 
-        print("\n-------- OVAL (CIRCULAR) --------")
+        print("\n-------- INNER-ELLIPTIC --------")
         ratio=3/10
         r2=r*ratio
         
@@ -1196,7 +888,7 @@ for n in range(int(nGroups)):
             xx=np.concatenate((s1x, xx1, s2x, xx2))
             yy=np.concatenate((s1y, yy1, s2y, yy2))
 
-            minVelocity=optimize.fmin(P_fixed,0,args=(r2,))
+            minVelocity=optimize.fmin(P_fixed, 0, args=(r2,))
             power=P_fixed(minVelocity, r2)[0]
 
             print("Curve Min Power Velocity: ", minVelocity[0])
@@ -1251,9 +943,9 @@ for n in range(int(nGroups)):
                 t+=(timeCurve/2)/4
 
         else:
-            print("OVAL (CIRCULAR) impossible for fixed-wing UAV Group %d" %(n+1))
+            print("INNER-ELLIPTIC impossible for fixed-wing UAV Group %d" %(n+1))
 
-        print("\n-------- OVAL (AREA) --------")
+        print("\n-------- ELLIPTIC --------")
         idealPos[0]=(coords[index][2]+coords[index][0])/2
         idealPos[1]=(coords[index][3]+coords[index][1])/2
 
@@ -1350,7 +1042,7 @@ for n in range(int(nGroups)):
                 oval_a_fixed.write(str(round(t,2)) +","+ str(round(xx2[75],2)) +","+ str(round(yy2[75],2)) +"\n")
                 t+=(timeCurve/2)/4
         else:
-            print("OVAL (AREA) impossible for fixed-wing UAV Group %d" %(n+1))
+            print("ELLIPTIC impossible for fixed-wing UAV Group %d" %(n+1))
 
     else: 
         print("Imposible trajectories for fixed-wing UAV Group %d" %(n+1))
@@ -1358,63 +1050,10 @@ for n in range(int(nGroups)):
 
     TEH_SUPPLY_FIXED+=TEH_SUPPLY_Aux
 
-    if Best_flag==0:
-        print("Best: None")
-    elif Best_flag==1:
-        print("Best: Circular")
-    elif Best_flag==2:
-        print("Best: Oval(circular)")
-    elif Best_flag==3:
-        print("Best: Oval(area)")
+    # Print best
+    print(best_flag.get(Best_flag))
 
-# PLOT ALL AREAS
-
-'''fig = plt.figure()
-
-ax = plt.axes(projection='3d')
-#ax.set_title('All Intersection Areas')
-ax.set_xlabel('X')
-ax.set_ylabel('Y')
-ax.set_zlabel('Z')
-ax.set_xlim3d(0, 100)
-ax.set_ylim3d(0, 100)
-ax.set_zlim3d(0, 10)
-z_ticks = np.arange(0, 12, 6)  
-ax.set_zticks(z_ticks)
-
-
-for index,j in enumerate(TotalPoints):
-    for n in range(int(nGroups)):
-        if n==0:    
-            if 0 < index < n_points[n]-1:
-                ax.scatter(j[0],j[1],j[2],marker='o', color=colors[n])
-        else:
-            if (n_points[n-1])-1 < index < n_points[n]-1:
-                ax.scatter(j[0],j[1],j[2],marker='o', color=colors[n])
-
-
-ax.set_box_aspect([100,100,12])
-
-ax.set_aspect('equal', adjustable='box')'''
-
-'''print("Optimal: ", round(TEH_Optimal/1000, 2))
-print("Circular: ", round(TEH_Circular/1000, 2))
-print("Oval(circular): ", round(TEH_Oval_Circular/1000, 2))
-print("Oval(area): ", round(TEH_Oval_Area/1000, 2))
-print("SUPPLY: ", round(TEH_SUPPLY/1000, 2))
-print("EREP: ", round(TEH_Trajectory/1000, 2))
-print("Hovering: ", round(TEH_Hovering/1000, 2))'''
-
-#print("Energy Reduction (%):", round((TEH_Hovering/1000-TEH_SUPPLY/1000)/(TEH_Hovering/1000)*100,1))
-
-
-#fig = plt.figure(figsize=(8, 4.8))
-'''xpart=['Optimal', 'EREP', 'Circular', 'Oval Circular', 'Oval Area', 'SUPPLY', 'Hovering']
-ypart=[TEH_Optimal/1000, TEH_Trajectory/1000, TEH_Circular/1000, TEH_Oval_Circular/1000, TEH_Oval_Area/1000, TEH_SUPPLY/1000, TEH_Hovering/1000]
-plt.bar(xpart,ypart,color=['black','C4', 'C0', 'orange', 'red', 'green'])
-plt.title('Energy Consumption Comparison')
-plt.ylabel('Energy Consumed per Hour (KiloJoule)')
-'''
+print("\n--------------------------- RESULTS ------------------------")
 
 print("SUPPLY Rotary: ", round(TEH_SUPPLY_ROTARY/1000, 2))
 
@@ -1424,43 +1063,13 @@ print("Energy consumption increase (%):", round((TEH_SUPPLY_FIXED/TEH_SUPPLY_ROT
 
 fig = plt.figure(figsize=(9, 5.2))
 plt.rcParams['font.size'] = 12
-#xpart=['Optimal_Rotary', 'Optimal_Fixed','SUPPLY_Rotary', 'SUPPLY_Fixed']
-#ypart=[TEH_Optimal_Rotary/1000, TEH_Optimal_Fixed/1000, TEH_SUPPLY_ROTARY/1000, TEH_SUPPLY_FIXED/1000]
 xpart=['SUPPLY Rotary', 'SUPPLY Fixed']
 ypart=[TEH_SUPPLY_ROTARY/1000, TEH_SUPPLY_FIXED/1000]
 color=['green','C0']
 plt.bar(xpart,ypart,color=['green','C0'])
 for i in range(len(xpart)):
     plt.text(i, round(ypart[i], 2), str(round(ypart[i], 2)), ha='center', va='bottom', color=color[i])
-#plt.title('Energy Consumption Comparison')
+
 plt.ylabel('Energy Consumed per Hour (KiloJoule)',)
 
-'''xpart=['Circular', 'Oval Circular', 'Oval Area', 'SUPPLY', 'Hovering']
-ypart=[TEH_Circular/1000, TEH_Oval_Circular/1000, TEH_Oval_Area/1000, TEH_SUPPLY/1000, TEH_Hovering/1000]
-plt.title('Energy Consumption Comparison')
-plt.ylabel('Energy Consumed per Hour (KiloJoule)')
-plt.ylim(bottom=(TEH_Optimal/1000)*0.8, top=(TEH_Hovering/1000)*1.05)
-
-plt.bar(xpart,ypart,color=['C0', 'orange', 'red', 'green', 'black'])'''
-
-
-'''results = open('Results10.txt', 'a')
-
-results.write(str(nGroups)+","+str(round((TEH_SUPPLY_ROTARY/1000),2))+","+str(round((TEH_SUPPLY_FIXED/1000),2))+"\n")'''
-
-'''sensitivity = open('Alt_Sensitivity2.txt', 'a')
-sensitivity.write(str(alt_min)+","+str(round((TEH_Optimal/1000),2))+","+str(round((TEH_Oval_Circular/1000),2))+","+str(round((TEH_Oval_Area/1000),2))+","+str(round((TEH_Oval_Best/1000),2))+","+str(round((TEH_Circular/1000),2))+","+str(round((TEH_Trajectory/1000),2))+","+str(round((TEH_Hovering/1000),2))+"\n")'''
-
-#sensitivity = open('New_Sensitivity2.txt', 'a')
-#sensitivity.write(str(alt_min)+","+str(round((TEH_Optimal/1000),2))+","+str(round((TEH_Oval_min/1000),2))+","+str(round((TEH_Oval_const/1000),2))+","+str(round((TEH_Oval_inc/1000),2))+","+str(round((TEH_Circular/1000),2))+","+str(round((TEH_Trajectory/1000),2))+","+str(round((TEH_Hovering/1000),2))+"\n")
-
-#plt.close('all') 
-if(flag):
-    print("COLISION DETECTED!!!!")
-else: print("")
-
 plt.show()
-
-""" 
-#SHIFT+ALT+A
-"""
